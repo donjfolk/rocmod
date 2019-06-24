@@ -11,9 +11,27 @@
 import socket
 import select
 import struct
+import datetime
 
 import crc
 
+class TimeoutError(Exception):
+	def __init__(self, sError):
+		self.error = sError
+	def __str__(self):
+		return repr(self.error)
+
+class OpcodeError(Exception):
+	def __init__(self, iOpcode, iErrorCode, aAdd):
+		self.opcode = iOpcode
+		self.errocode = iErrorCode
+		self.address = aAdd
+	def __str__(self):
+		try:
+			self.errocode = self.address[int(self.errocode)-1]
+		except Exception, ex:
+			pass
+		return "Opcde Error: Opcode:%s Device Parameter:%s"%(repr(self.opcode), repr(self.errocode))
 
 
 class TcpMaster(object):
@@ -25,6 +43,7 @@ class TcpMaster(object):
 		self._sock = None
 		self._host_group = host_group
 		self._host_address = host_address
+		self.access = False
 		
 	def _do_open(self):
 		"""Connect to the Modbus slave"""
@@ -50,6 +69,7 @@ class TcpMaster(object):
 			#if we can't flush the socket successfully: a disconnection may happened
 			#try to reconnect
 			self._do_open()
+		print  "TX:"+" ".join("{:02x}".format(ord(c)) for c in request)
 		self._sock.send(request)
 	
 	def _recv(self, expected_length=-1):
@@ -66,8 +86,11 @@ class TcpMaster(object):
 				if len(response) == 6:
 					to_be_recv_length = struct.unpack('B',rcv_byte)[0]
 					length = to_be_recv_length + 6 + 2
+				
 			else:
 				break
+		
+		print "RX:"+" ".join(["{:02x}".format(i) for i in response])
 		return response
 	
 	
@@ -78,6 +101,121 @@ class TcpMaster(object):
 			self._sock.setblocking(timeout_in_sec > 0)
 			if timeout_in_sec:
 				self._sock.settimeout(timeout_in_sec)
+	
+    #=============================================================================================================
+	# OPCODE 120 POINTER
+	#=============================================================================================================
+	def opcode120(self, address, group, expected_length=-1):
+		data = [address, group, self._host_address, self._host_group, 120,0]
+		request = ""
+		for i in data:
+			request += struct.pack('B',i)
+		for i in crc.crc16(request):
+			request += struct.pack('B',i)
+		self._send(request)
+		data = self._recv()
+		responsecrc = data[-2:]
+		data = data[:-2]
+		response = ""
+		for i in data:
+			response += struct.pack('B',i)
+		
+		if not(crc.crc16(response) == responsecrc):
+			raise RuntimeError('CRC Error')
+		if not(data[0] == self._host_address) or not(data[1] == self._host_group):
+			raise RuntimeError('Incorrect Host Address in Response')
+		
+		if not(data[2] == address) or not(data[3] == group):
+			raise RuntimeError('Incorrect Device Address in Response')
+		
+		if not(data[4] == 120) and (data[4] != 255):
+			raise RuntimeError('Incorrect OPCode in Response')
+		if (data[4] == 255):
+			raise OpcodeError(data[7], data[6],[])
+		return data[6:32]
+
+    #=============================================================================================================
+	# OPCODE 126 MINUTE HISTORY
+	#=============================================================================================================
+	def opcode126(self, address, group, point, expected_length=-1):
+		data = [address, group, self._host_address, self._host_group, 126, 1, point]
+		clock = self.opcode180(address=address, group=group, TLP=[[12,0,5],[12,0,4],[12,0,3],[12,0,2]], data_format=['b','b','b','b'])
+		iHour = clock[3]
+		sDate = "20%2d-%02d-%02d"%(clock[0],clock[1],clock[2])
+		request = ""
+		for i in data:
+			request += struct.pack('B',i)
+		for i in crc.crc16(request):
+			request += struct.pack('B',i)
+		self._send(request)
+		data = self._recv()
+		responsecrc = data[-2:]
+		data = data[:-2]
+		response = ""
+		for i in data:
+			response += struct.pack('B',i)
+		
+		if not(crc.crc16(response) == responsecrc):
+			raise RuntimeError('CRC Error')
+		if not(data[0] == self._host_address) or not(data[1] == self._host_group):
+			raise RuntimeError('Incorrect Host Address in Response')
+		
+		if not(data[2] == address) or not(data[3] == group):
+			raise RuntimeError('Incorrect Device Address in Response')
+		
+		if not(data[4] == 126) and (data[4] != 255):
+			raise RuntimeError('Incorrect OPCode in Response')
+		if (data[4] == 255):
+			raise OpcodeError(data[7], data[6],[])
+		
+		if not(data[6] == point):
+			raise RuntimeError('Incorrect Pointer in Response')
+		
+		iMin = data[7]
+		hist = data[8:]
+		iBit = 0
+		aHist = []
+		for i in range(60):
+		    
+		    value = ''
+		    value += struct.pack('B',hist[iBit])
+		    value += struct.pack('B',hist[iBit + 1])
+		    value += struct.pack('B',hist[iBit + 2])
+		    value += struct.pack('B',hist[iBit + 3])
+		    aValue = struct.unpack('f',value)
+		    #aHist.append(aValue[0])
+		    iBit += 4
+		    date_time = datetime.datetime(clock[0]+2000,clock[1],clock[2],iHour,i, 00)
+			
+		    if i >= iMin:
+		    	date_time = date_time - datetime.timedelta(hours=1)
+		    sTime = date_time.strftime('%Y-%m-%d %H:%M:%S')
+		    
+		    aHist.append({'date_time':sTime, 'value': aValue[0]})
+		
+		
+		return aHist
+
+    #=============================================================================================================
+	# OPCODE 17 LOGIN
+	#=============================================================================================================
+	def opcode17(self, address, group, expected_length=-1):
+		data = [address, group, self._host_address, self._host_group, 17, 5,76,79,73,03,232]
+		request = ""
+		for i in data:
+			request += struct.pack('B',i)
+		for i in crc.crc16(request):
+			request += struct.pack('B',i)
+		self._send(request)
+		data = self._recv()
+		responsecrc = data[-2:]
+		data = data[:-2]
+		response = ""
+		for i in data:
+			response += struct.pack('B',i)
+		
+		if not(crc.crc16(response) == responsecrc):
+			raise RuntimeError('CRC Error')
 	
 	#=============================================================================================================
 	# OPCODE 128 Read Daily History
@@ -105,8 +243,10 @@ class TcpMaster(object):
 		if not(data[2] == address) or not(data[3] == group):
 			raise RuntimeError('Incorrect Device Address in Response')
 		
-		if not(data[4] == 128):
+		if not(data[4] == 128) and (data[4] != 255):
 			raise RuntimeError('Incorrect OPCode in Response')
+		if (data[4] == 255):
+			raise OpcodeError(data[7], data[6],[])
 		
 		if not(data[7] == month) or not(data[8] == day):
 			raise RuntimeError('Incorrect Date in Response')
@@ -116,7 +256,9 @@ class TcpMaster(object):
 		value += struct.pack('B',data[110])
 		value += struct.pack('B',data[111])
 		value += struct.pack('B',data[112])
-		return struct.unpack('f',value)
+		aValue = struct.unpack('f',value)
+		print "Job Done Data:%s"%(",".join(map(str, aValue)))
+		return aValue
 		
 	#=============================================================================================================
 	# OPCODE 180 Read TLP
@@ -156,8 +298,10 @@ class TcpMaster(object):
 		if not(data[2] == address) or not(data[3] == group):
 			raise RuntimeError('Incorrect Device Address in Response')
 		
-		if not(data[4] == 180):
+		if not(data[4] == 180) and (data[4] != 255):
 			raise RuntimeError('Incorrect OPCode in Response')
+		if (data[4] == 255):
+			raise OpcodeError(data[7], data[6],TLP)
 		
 		tlplength = data[6]
 		data = data[7:]
@@ -188,7 +332,9 @@ class TcpMaster(object):
 					value += struct.pack('B',data[3+x])
 				data = data[3+stringlength:]
 				data_format[i] = dataformat
-		return struct.unpack(''.join(data_format),value)
+		aValue = struct.unpack('=%s'%(''.join(data_format)),value)
+		print "Job Done Data:%s"%(",".join(map(str, aValue)))
+		return aValue
 	
 	
 	#=============================================================================================================
