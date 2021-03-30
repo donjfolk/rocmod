@@ -268,6 +268,7 @@ class TcpMaster(object):
 		self.data_format = data_format
 		length = 1
 		regs = 0
+		aValue = []
 		for t,l,p in TLP:
 			length += 3
 			regs += 1
@@ -311,30 +312,34 @@ class TcpMaster(object):
 			if not(data[0] == t) or not(data[1] == l) or not(data[2] == p):
 				raise RuntimeError('TLP Recieved is not TLP Requested')
 			if data_format[i] in ['f','q','L','l','i']:
-				value += struct.pack('B',data[3])
+				value = struct.pack('B',data[3])
 				value += struct.pack('B',data[4])
 				value += struct.pack('B',data[5])
 				value += struct.pack('B',data[6])
+				aValue.append(struct.unpack('=%s'%(data_format[i]),value)[0])
 				data = data[7:]
 			elif data_format[i] in ['h','H']:
-				value += struct.pack('B',data[3])
+				value = struct.pack('B',data[3])
 				value += struct.pack('B',data[4])
+				aValue.append(struct.unpack('=%s'%(data_format[i]),value)[0])
 				data = data[5:]
 			elif data_format[i] in ['b','B']:
-				value += struct.pack('B',data[3])
+				value = struct.pack('B',data[3])
+				aValue.append(struct.unpack('=%s'%(data_format[i]),value)[0])
 				data = data[4:]
 			else:
 				#MUST BE A STRING (c)
 				stringlength = int(data_format[i].replace('c',''))
 				dataformat = ''
+				sVal = ''
 				for x in range(stringlength):
 					dataformat += 'c'
-					value += struct.pack('B',data[3+x])
+					sVal += struct.pack('B',data[3+x])
+				aValue.append(sVal)
 				data = data[3+stringlength:]
 				data_format[i] = dataformat
-		aValue = struct.unpack('=%s'%(''.join(data_format)),value)
 		print "Job Done Data:%s"%(",".join(map(str, aValue)))
-		return aValue
+		return tuple(aValue)
 	
 	
 	#=============================================================================================================
